@@ -154,6 +154,12 @@ impl FileSearchWriteTransaction {
         Ok(())
     }
 
+    pub fn rollback(&mut self) -> Result<(), TantivyError> {
+        let _ = self.writer.rollback()?;
+
+        Ok(())
+    }
+
     fn path_to_str(path: &Path) -> Result<&str, io::Error> {
         path.to_str().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "File path is not valid UTF-8")
