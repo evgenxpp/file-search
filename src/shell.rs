@@ -11,7 +11,7 @@ use crate::search::{FileSearch, FileSearchWriteTransaction};
 pub struct Shell {
     searcher: FileSearch,
     writer: Option<Result<FileSearchWriteTransaction, TantivyError>>,
-    is_flushed: bool,
+    is_tnx_open: bool,
 }
 
 impl Shell {
@@ -19,7 +19,7 @@ impl Shell {
         Self {
             searcher,
             writer: None,
-            is_flushed: true,
+            is_tnx_open: false,
         }
     }
 
@@ -57,7 +57,7 @@ impl Shell {
             ("commit", None) => self.handle_commit_command(),
             ("rollback", None) => self.handle_rollback_command(),
             ("exit", None) => {
-                if !self.is_flushed {
+                if self.is_tnx_open {
                     self.handle_rollback_command();
                 }
 
@@ -91,61 +91,45 @@ impl Shell {
     }
 
     fn handle_clear_command(&mut self) {
-        let result = self.with_writer(|writer| writer.clear());
-
-        if result && self.is_flushed {
-            self.is_flushed = false;
-        }
+        self.with_writer(|writer| writer.clear(), true);
     }
 
     fn handle_commit_command(&mut self) {
-        if self.is_flushed {
-            eprintln!("No changes to commit");
+        if self.is_tnx_open {
+            self.with_writer(|writer| writer.commit(), false);
         } else {
-            self.is_flushed = self.with_writer(|writer| writer.commit());
+            eprintln!("No changes to commit.");
         }
     }
 
     fn handle_rollback_command(&mut self) {
-        if self.is_flushed {
-            eprintln!("No changes to rollback");
+        if self.is_tnx_open {
+            self.with_writer(|writer| writer.rollback(), false);
         } else {
-            self.is_flushed = self.with_writer(|writer| writer.rollback());
+            eprintln!("No changes to rollback.");
         }
     }
 
     fn handle_add_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            let result = self.with_writer(|writer| writer.append(&path));
-
-            if result && self.is_flushed {
-                self.is_flushed = false;
-            }
+            self.with_writer(|writer| writer.append(&path), true);
         }
     }
 
     fn handle_remove_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            let result = self.with_writer(|writer| writer.remove(&path));
-
-            if result && self.is_flushed {
-                self.is_flushed = false;
-            }
+            self.with_writer(|writer| writer.remove(&path), true);
         }
     }
 
     fn handle_update_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            let result = self.with_writer(|writer| writer.upsert(&path));
-
-            if result && self.is_flushed {
-                self.is_flushed = false;
-            }
+            self.with_writer(|writer| writer.upsert(&path), true);
         }
     }
 
     fn handle_search_command(&mut self, query: &str) {
-        if self.is_flushed {
+        if !self.is_tnx_open {
             match self
                 .searcher
                 .open_read()
@@ -153,16 +137,16 @@ impl Shell {
             {
                 Ok(entries) => match serde_json::to_string(&entries) {
                     Ok(json) => println!("{json}"),
-                    Err(error) => eprintln!("Cannot serialize found entries: {error}"),
+                    Err(error) => eprintln!("Cannot serialize found entries. {error}"),
                 },
-                Err(error) => eprintln!("Failed to search documents: {error}"),
+                Err(error) => eprintln!("Failed to search documents. {error}"),
             }
         } else {
-            eprintln!("You have uncommitted changes. Please commit or rollback before searching")
+            eprintln!("You have uncommitted changes. Please commit or rollback before searching.")
         }
     }
 
-    fn with_writer<F>(&mut self, f: F) -> bool
+    fn with_writer<F>(&mut self, f: F, tnx_next_state: bool)
     where
         F: FnOnce(&mut FileSearchWriteTransaction) -> Result<(), TantivyError>,
     {
@@ -175,26 +159,24 @@ impl Shell {
         match writer {
             Ok(writer) => {
                 if let Err(error) = f(writer) {
-                    eprintln!("Failed to change index: {error}");
-                } else {
-                    return true;
+                    eprintln!("Failed to change index. {error}");
+                } else if self.is_tnx_open != tnx_next_state {
+                    self.is_tnx_open = tnx_next_state;
                 }
             }
-            Err(err) => eprintln!("Unable to start write session: {err}"),
+            Err(err) => eprintln!("Unable to start write session. {err}"),
         }
-
-        false
     }
 
     fn resolve_file_path(path: &str) -> Option<PathBuf> {
         match fs::metadata(path) {
             Ok(metadata) if metadata.is_file() => Some(PathBuf::from(path)),
             Ok(_) => {
-                eprintln!("The path '{path}' is not a file");
+                eprintln!("The path '{path}' is not a file.");
                 None
             }
             Err(error) => {
-                eprintln!("Failed to access file '{path}': {error}");
+                eprintln!("Failed to access file '{path}'. {error}");
                 None
             }
         }
