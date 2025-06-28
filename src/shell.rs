@@ -1,16 +1,16 @@
 use std::{
     fs,
     io::{self, BufRead},
-    path::PathBuf,
 };
 
-use tantivy::TantivyError;
-
-use crate::search::{FileSearch, FileSearchWriteTransaction};
+use crate::{
+    error::Error,
+    search::{FileSearch, FileSearchWriteTransaction},
+};
 
 pub struct Shell {
     searcher: FileSearch,
-    writer: Option<Result<FileSearchWriteTransaction, TantivyError>>,
+    writer: Option<Result<FileSearchWriteTransaction, Error>>,
     is_tnx_open: bool,
 }
 
@@ -112,19 +112,19 @@ impl Shell {
 
     fn handle_add_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.append(&path), true);
+            self.with_writer(|writer| writer.append(path), true);
         }
     }
 
     fn handle_remove_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.remove(&path), true);
+            self.with_writer(|writer| writer.remove(path), true);
         }
     }
 
     fn handle_update_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.upsert(&path), true);
+            self.with_writer(|writer| writer.upsert(path), true);
         }
     }
 
@@ -148,7 +148,7 @@ impl Shell {
 
     fn with_writer<F>(&mut self, f: F, tnx_next_state: bool)
     where
-        F: FnOnce(&mut FileSearchWriteTransaction) -> Result<(), TantivyError>,
+        F: FnOnce(&mut FileSearchWriteTransaction) -> Result<(), Error>,
     {
         if self.writer.is_none() {
             self.writer = Some(self.searcher.open_write());
@@ -168,9 +168,9 @@ impl Shell {
         }
     }
 
-    fn resolve_file_path(path: &str) -> Option<PathBuf> {
+    fn resolve_file_path(path: &str) -> Option<&str> {
         match fs::metadata(path) {
-            Ok(metadata) if metadata.is_file() => Some(PathBuf::from(path)),
+            Ok(metadata) if metadata.is_file() => Some(path),
             Ok(_) => {
                 eprintln!("The path '{path}' is not a file.");
                 None

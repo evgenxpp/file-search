@@ -1,8 +1,8 @@
 use std::{
     collections::{HashMap, HashSet},
-    fs, io,
+    fs,
     ops::Range,
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use serde::Serialize;
@@ -14,10 +14,12 @@ use tantivy::{
     schema::{self, Field, Schema, Value},
 };
 
+use crate::error::Error;
+
 #[derive(Serialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct FileSearchEntry {
-    pub path: PathBuf,
+    pub path: String,
     pub score: f32,
     pub fragments: HashMap<String, Vec<Range<usize>>>,
 }
@@ -37,15 +39,13 @@ impl FileSearchReadTransaction {
         }
     }
 
-    pub fn search(
-        &self,
-        query: &str,
-        limit: Option<usize>,
-    ) -> Result<Vec<FileSearchEntry>, TantivyError> {
+    pub fn search(&self, query: &str, limit: Option<usize>) -> Result<Vec<FileSearchEntry>, Error> {
         let searcher = self.reader.searcher();
         let index = searcher.index();
         let query_parser = QueryParser::for_index(index, vec![self.field_content]);
-        let query = query_parser.parse_query(query)?;
+        let query = query_parser
+            .parse_query(query)
+            .map_err(Into::<TantivyError>::into)?;
         let mut terms = HashSet::new();
 
         query.query_terms(&mut |term, _| {
@@ -79,8 +79,6 @@ impl FileSearchReadTransaction {
             }
 
             if let Some(path) = Self::get_doc_value(&doc, self.field_path) {
-                let path = Path::new(path);
-
                 entries.push(FileSearchEntry {
                     score,
                     fragments,
@@ -116,12 +114,11 @@ impl FileSearchWriteTransaction {
         }
     }
 
-    pub fn append(&mut self, path: &Path) -> Result<(), TantivyError> {
-        let path_str = Self::path_to_str(path)?;
-        let content = fs::read_to_string(path)?;
+    pub fn append(&mut self, path: &str) -> Result<(), Error> {
+        let content = fs::read_to_string(path).map_err(Into::<TantivyError>::into)?;
 
         let mut document = TantivyDocument::new();
-        document.add_field_value(self.field_path, path_str);
+        document.add_field_value(self.field_path, path);
         document.add_field_value(self.field_content, &content);
 
         let _ = self.writer.add_document(document)?;
@@ -129,41 +126,34 @@ impl FileSearchWriteTransaction {
         Ok(())
     }
 
-    pub fn remove(&mut self, path: &Path) -> Result<(), TantivyError> {
-        let path_str = Self::path_to_str(path)?;
-        let term = Term::from_field_text(self.field_path, path_str);
+    pub fn remove(&mut self, path: &str) -> Result<(), Error> {
+        let term = Term::from_field_text(self.field_path, path);
         let _ = self.writer.delete_term(term);
 
         Ok(())
     }
 
-    pub fn upsert(&mut self, path: &Path) -> Result<(), TantivyError> {
+    pub fn upsert(&mut self, path: &str) -> Result<(), Error> {
         self.remove(path)?;
         self.append(path)
     }
 
-    pub fn clear(&mut self) -> Result<(), TantivyError> {
+    pub fn clear(&mut self) -> Result<(), Error> {
         let _ = self.writer.delete_all_documents()?;
 
         Ok(())
     }
 
-    pub fn commit(&mut self) -> Result<(), TantivyError> {
+    pub fn commit(&mut self) -> Result<(), Error> {
         let _ = self.writer.commit()?;
 
         Ok(())
     }
 
-    pub fn rollback(&mut self) -> Result<(), TantivyError> {
+    pub fn rollback(&mut self) -> Result<(), Error> {
         let _ = self.writer.rollback()?;
 
         Ok(())
-    }
-
-    fn path_to_str(path: &Path) -> Result<&str, io::Error> {
-        path.to_str().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::InvalidData, "File path is not valid UTF-8")
-        })
     }
 }
 
@@ -175,12 +165,12 @@ pub struct FileSearch {
 }
 
 impl FileSearch {
-    pub fn create(path: &Path) -> Result<Self, TantivyError> {
+    pub fn create(path: &Path) -> Result<Self, Error> {
         let mut schema_builder = Schema::builder();
         let field_path = schema_builder.add_text_field("path", schema::STRING | schema::STORED);
         let field_content = schema_builder.add_text_field("content", schema::TEXT | schema::STORED);
         let schema = schema_builder.build();
-        let dir = MmapDirectory::open(path)?;
+        let dir = MmapDirectory::open(path).map_err(Into::<TantivyError>::into)?;
         let index = Index::open_or_create(dir, schema)?;
 
         Ok(Self {
@@ -190,7 +180,7 @@ impl FileSearch {
         })
     }
 
-    pub fn open_write(&self) -> Result<FileSearchWriteTransaction, TantivyError> {
+    pub fn open_write(&self) -> Result<FileSearchWriteTransaction, Error> {
         Ok(FileSearchWriteTransaction::new(
             self.index.writer(50_000_000)?,
             self.field_path,
@@ -198,7 +188,7 @@ impl FileSearch {
         ))
     }
 
-    pub fn open_read(&self) -> Result<FileSearchReadTransaction, TantivyError> {
+    pub fn open_read(&self) -> Result<FileSearchReadTransaction, Error> {
         Ok(FileSearchReadTransaction::new(
             self.index
                 .reader_builder()
