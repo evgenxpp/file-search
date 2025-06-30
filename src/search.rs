@@ -18,6 +18,7 @@ use tantivy::{
     Index, IndexReader, IndexWriter, ReloadPolicy, TantivyDocument, Term,
     collector::TopDocs,
     directory::MmapDirectory,
+    indexer::IndexWriterOptions,
     query::QueryParser,
     schema::{self, Field, Schema, Value as TantivyValue},
 };
@@ -200,24 +201,24 @@ impl FileSearchWriteTransaction {
         self.delete_from_state(path)
     }
 
-    pub fn clear(&mut self) -> Result<(), Error> {
-        let mut table = self.txn.open_table(STATE_TABLE)?;
-        let keys: Vec<_> = table
-            .iter()?
-            .map(|entry| entry.map(|(key, _)| key.value().to_owned()))
-            .collect::<Result<_, _>>()?;
-
-        for key in keys.iter() {
-            table.remove(key.as_str())?;
-        }
-
+    pub fn clear(mut self) -> Result<(), Error> {
+        self.clear_state()?;
         self.writer.delete_all_documents()?;
-        Ok(())
+        self.commit()
     }
 
     pub fn commit(mut self) -> Result<(), Error> {
-        self.writer.commit()?;
-        self.txn.commit()?;
+        let prep = self.writer.prepare_commit()?;
+
+        match self.txn.commit() {
+            Ok(_) => {
+                prep.commit()?;
+            }
+            _ => {
+                prep.abort()?;
+            }
+        }
+
         Ok(())
     }
 
@@ -271,6 +272,20 @@ impl FileSearchWriteTransaction {
         self.writer.delete_term(term);
         Ok(())
     }
+
+    fn clear_state(&mut self) -> Result<(), Error> {
+        let mut table = self.txn.open_table(STATE_TABLE)?;
+        let keys: Vec<_> = table
+            .iter()?
+            .map(|entry| entry.map(|(key, _)| key.value().to_owned()))
+            .collect::<Result<_, _>>()?;
+
+        for key in keys.iter() {
+            table.remove(key.as_str())?;
+        }
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -299,10 +314,22 @@ impl FileSearch {
         })
     }
 
+    pub fn compact(&mut self) -> Result<bool, Error> {
+        self.db.compact().map_err(|error| error.into())
+    }
+
     pub fn open_write(&self) -> Result<FileSearchWriteTransaction, Error> {
+        let mut writer = self.db.begin_write()?;
+        writer.set_two_phase_commit(true);
+
         Ok(FileSearchWriteTransaction::new(
-            self.db.begin_write()?,
-            self.index.writer(50_000_000)?,
+            writer,
+            self.index.writer_with_options(
+                IndexWriterOptions::builder()
+                    .memory_budget_per_thread(50_000_000)
+                    .num_worker_threads(1)
+                    .build(),
+            )?,
             self.field_path,
             self.field_content,
         ))

@@ -86,7 +86,24 @@ impl Shell {
     }
 
     fn handle_clear_command(&mut self) {
-        self.with_writer(|writer| writer.clear());
+        if self.writer.is_some() {
+            eprintln!("You have uncommitted changes. Please commit or rollback before clearing.");
+            return;
+        }
+
+        match self.searcher.open_write() {
+            Ok(writer) => match writer.clear() {
+                Ok(()) => {
+                    println!("Index and state cleared successfully.");
+
+                    if let Err(error) = self.searcher.compact() {
+                        eprintln!("Unable to compact database. {error}")
+                    }
+                }
+                Err(error) => eprintln!("Failed to clear documents. {error}"),
+            },
+            Err(error) => eprintln!("Unable to start write session. {error}"),
+        }
     }
 
     fn handle_list_command(&mut self) {
@@ -104,22 +121,28 @@ impl Shell {
 
     fn handle_commit_command(&mut self) {
         match self.writer.take() {
-            Some(writer) => {
-                if let Err(error) = writer.commit() {
-                    eprintln!("Failed to commit. {error}");
+            Some(writer) => match writer.commit() {
+                Ok(()) => {
+                    if let Err(error) = self.searcher.compact() {
+                        eprintln!("Unable to compact database. {error}")
+                    }
                 }
-            }
+                Err(error) => eprintln!("Failed to commit. {error}"),
+            },
             _ => eprintln!("No changes to commit."),
         }
     }
 
     fn handle_rollback_command(&mut self) {
         match self.writer.take() {
-            Some(writer) => {
-                if let Err(error) = writer.rollback() {
-                    eprintln!("Failed to rollback. {error}");
+            Some(writer) => match writer.rollback() {
+                Ok(()) => {
+                    if let Err(error) = self.searcher.compact() {
+                        eprintln!("Unable to compact database. {error}")
+                    }
                 }
-            }
+                Err(error) => eprintln!("Failed to rollback. {error}"),
+            },
             _ => eprintln!("No changes to rollback."),
         }
     }

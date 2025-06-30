@@ -15,8 +15,8 @@ pub enum ErrorSource {
 
 #[derive(Debug)]
 pub struct Error {
-    source: ErrorSource,
-    message: String,
+    pub source: ErrorSource,
+    pub message: String,
 }
 
 impl From<io::Error> for Error {
@@ -39,6 +39,15 @@ impl From<redb::Error> for Error {
 
 impl From<redb::StorageError> for Error {
     fn from(value: redb::StorageError) -> Self {
+        Error {
+            source: ErrorSource::Redb,
+            message: value.to_string(),
+        }
+    }
+}
+
+impl From<redb::CompactionError> for Error {
+    fn from(value: redb::CompactionError) -> Self {
         Error {
             source: ErrorSource::Redb,
             message: value.to_string(),
