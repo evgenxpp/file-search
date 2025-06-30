@@ -10,8 +10,7 @@ use crate::{
 
 pub struct Shell {
     searcher: FileSearch,
-    writer: Option<Result<FileSearchWriteTransaction, Error>>,
-    is_tnx_open: bool,
+    writer: Option<FileSearchWriteTransaction>,
 }
 
 impl Shell {
@@ -19,7 +18,6 @@ impl Shell {
         Self {
             searcher,
             writer: None,
-            is_tnx_open: false,
         }
     }
 
@@ -54,18 +52,15 @@ impl Shell {
         match (name, arg) {
             ("help", None) => self.handle_help_command(),
             ("clear", None) => self.handle_clear_command(),
+            ("list", None) => self.handle_list_command(),
             ("commit", None) => self.handle_commit_command(),
             ("rollback", None) => self.handle_rollback_command(),
             ("exit", None) => {
-                if self.is_tnx_open {
-                    self.handle_rollback_command();
-                }
-
+                self.handle_rollback_command();
                 return false;
             }
             ("add", Some(path)) => self.handle_add_command(path),
             ("remove", Some(path)) => self.handle_remove_command(path),
-            ("upsert", Some(path)) => self.handle_update_command(path),
             ("search", Some(query)) => self.handle_search_command(query),
             _ => {
                 eprintln!("Unknown command: {name} {}", arg.unwrap_or_default());
@@ -79,9 +74,9 @@ impl Shell {
     fn handle_help_command(&mut self) {
         println!("Commands:");
         println!("  help             Show this help message");
+        println!("  list             Show all documents");
         println!("  add <path>       Add a new document");
         println!("  remove <path>    Remove an existing document");
-        println!("  upsert <path>    Add or replace a document");
         println!("  clear            Remove all documents from index");
         println!("  commit           Commit pending changes");
         println!("  rollback         Undo pending changes");
@@ -91,45 +86,58 @@ impl Shell {
     }
 
     fn handle_clear_command(&mut self) {
-        self.with_writer(|writer| writer.clear(), true);
+        self.with_writer(|writer| writer.clear());
+    }
+
+    fn handle_list_command(&mut self) {
+        match self.searcher.open_read() {
+            Ok(trx) => match trx.list() {
+                Ok(entries) => match serde_json::to_string(&entries) {
+                    Ok(json) => println!("{json}"),
+                    Err(error) => eprintln!("Cannot serialize found entries. {error}"),
+                },
+                Err(error) => eprintln!("Cannot retrive documents. {error}"),
+            },
+            Err(err) => eprintln!("Unable to start read session. {err}"),
+        }
     }
 
     fn handle_commit_command(&mut self) {
-        if self.is_tnx_open {
-            self.with_writer(|writer| writer.commit(), false);
-        } else {
-            eprintln!("No changes to commit.");
+        match self.writer.take() {
+            Some(writer) => {
+                if let Err(error) = writer.commit() {
+                    eprintln!("Failed to commit. {error}");
+                }
+            }
+            _ => eprintln!("No changes to commit."),
         }
     }
 
     fn handle_rollback_command(&mut self) {
-        if self.is_tnx_open {
-            self.with_writer(|writer| writer.rollback(), false);
-        } else {
-            eprintln!("No changes to rollback.");
+        match self.writer.take() {
+            Some(writer) => {
+                if let Err(error) = writer.rollback() {
+                    eprintln!("Failed to rollback. {error}");
+                }
+            }
+            _ => eprintln!("No changes to rollback."),
         }
     }
 
     fn handle_add_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.append(path), true);
+            self.with_writer(|writer| writer.add(path));
         }
     }
 
     fn handle_remove_command(&mut self, path: &str) {
         if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.remove(path), true);
-        }
-    }
-
-    fn handle_update_command(&mut self, path: &str) {
-        if let Some(path) = Self::resolve_file_path(path) {
-            self.with_writer(|writer| writer.upsert(path), true);
+            self.with_writer(|writer| writer.remove(path));
         }
     }
 
     fn handle_search_command(&mut self, query: &str) {
-        if !self.is_tnx_open {
+        if self.writer.is_none() {
             match self
                 .searcher
                 .open_read()
@@ -146,22 +154,25 @@ impl Shell {
         }
     }
 
-    fn with_writer<F>(&mut self, f: F, tnx_next_state: bool)
+    fn get_or_create_writer(&mut self) -> Result<&mut FileSearchWriteTransaction, Error> {
+        match self.writer {
+            Some(ref mut writer) => Ok(writer),
+            _ => {
+                let new_writer = self.searcher.open_write()?;
+                self.writer = Some(new_writer);
+                Ok(self.writer.as_mut().unwrap())
+            }
+        }
+    }
+
+    fn with_writer<F>(&mut self, f: F)
     where
         F: FnOnce(&mut FileSearchWriteTransaction) -> Result<(), Error>,
     {
-        if self.writer.is_none() {
-            self.writer = Some(self.searcher.open_write());
-        }
-
-        let writer = self.writer.as_mut().unwrap();
-
-        match writer {
+        match self.get_or_create_writer() {
             Ok(writer) => {
                 if let Err(error) = f(writer) {
                     eprintln!("Failed to change index. {error}");
-                } else if self.is_tnx_open != tnx_next_state {
-                    self.is_tnx_open = tnx_next_state;
                 }
             }
             Err(err) => eprintln!("Unable to start write session. {err}"),
